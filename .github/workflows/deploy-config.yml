@@ -1,0 +1,77 @@
+name: Deploy SMTP Config to Remote
+
+# This workflow reads SMTP secrets from GitHub Secrets and writes them
+# to the .env file on the remote server. Trigger it once after configuring
+# the secrets in Settings > Secrets and variables > Actions.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  deploy-config:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Write .env to remote server
+        env:
+          REMOTE_HOST: ${{ secrets.REMOTE_HOST }}
+          REMOTE_USER: ${{ secrets.REMOTE_USER }}
+          REMOTE_PASS: ${{ secrets.REMOTE_PASS }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_SSL: ${{ secrets.SMTP_SSL }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_NAME: ${{ secrets.SMTP_NAME }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          NDX_THRESHOLD_PCT: ${{ vars.NDX_THRESHOLD_PCT }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "$REMOTE_HOST" ] || [ -z "$REMOTE_PASS" ]; then
+            echo "ERROR: REMOTE_HOST and REMOTE_PASS secrets must be configured."
+            exit 1
+          fi
+          if [ -z "$SMTP_SERVER" ] || [ -z "$SMTP_EMAIL" ] || [ -z "$SMTP_PASSWORD" ]; then
+            echo "ERROR: SMTP_SERVER, SMTP_EMAIL, SMTP_PASSWORD secrets must be configured."
+            exit 1
+          fi
+
+          # Build .env content
+          ENV_CONTENT="SMTP_SERVER=${SMTP_SERVER}
+          SMTP_PORT=${SMTP_PORT}
+          SMTP_SSL=${SMTP_SSL:-true}
+          SMTP_EMAIL=${SMTP_EMAIL}
+          SMTP_PASSWORD=${SMTP_PASSWORD}
+          SMTP_NAME=${SMTP_NAME:-Nasdaq Alert}
+          SMTP_TO=${SMTP_TO:-$SMTP_EMAIL}
+          NDX_THRESHOLD_PCT=${NDX_THRESHOLD_PCT:--1.0}
+          NDX_TICKER=^NDX
+          NDX_CHECK_INTERVAL=60
+          NDX_ALERT_COOLDOWN=1800
+          NDX_MARKET_TZ=America/New_York
+          NDX_LOG_LEVEL=INFO
+          "
+
+          # Install sshpass for non-interactive SSH
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq sshpass
+
+          # Write .env to remote server
+          sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=no \
+            "${REMOTE_USER:-root}@$REMOTE_HOST" \
+            "cat > /opt/nasdaq-alert/.env" <<< "$ENV_CONTENT"
+
+          # Restart the service to pick up new config
+          sshpass -p "$REMOTE_PASS" ssh -o StrictHostKeyChecking=no \
+            "${REMOTE_USER:-root}@$REMOTE_HOST" \
+            "systemctl restart nasdaq-alert && systemctl status nasdaq-alert --no-pager"
+
+          echo "✅ SMTP config deployed and service restarted."
