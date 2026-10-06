@@ -3,13 +3,16 @@
 Nasdaq-100 Index Drop Monitor
 =============================
 
-Continuously monitors the Nasdaq-100 index (^NDX). When the daily change
+Continuously monitors the Nasdaq-100 index (NDX). When the daily change
 drops below a configured threshold (default -1%), sends an email alert.
 
 Designed to run as a systemd service on a remote server, checking every
 minute during US market trading hours.
 
-Data source: Yahoo Finance via yfinance (^NDX = Nasdaq-100 Index).
+Data sources (in priority order, with automatic fallback):
+  1. Eastmoney (东方财富)  — push2.eastmoney.com   (China-accessible)
+  2. Tencent (腾讯财经)    — qt.gtimg.cn            (China-accessible)
+  3. Yahoo Finance (yfinance) — query1/2.finance.yahoo.com (may be geo-blocked in China)
 """
 
 from __future__ import annotations
@@ -17,12 +20,13 @@ from __future__ import annotations
 import os
 import sys
 import time
+import json
 import signal
 import logging
-from datetime import datetime, timezone, timedelta
+import urllib.request
+import urllib.parse
+from datetime import datetime
 from zoneinfo import ZoneInfo
-
-import yfinance as yf
 
 from notify import send as send_email
 
@@ -42,6 +46,9 @@ MARKET_CLOSE_HM = (16, 0)
 # Cooldown: after sending an alert, wait this long before alerting again
 # (prevents spamming). Default 30 minutes.
 ALERT_COOLDOWN = int(os.environ.get("NDX_ALERT_COOLDOWN", "1800"))
+
+# HTTP request timeout (seconds)
+HTTP_TIMEOUT = 15
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -78,58 +85,145 @@ def is_market_open(now_et: datetime | None = None) -> bool:
     return market_open <= now <= market_close
 
 
-def _get_nested(d, *keys):
-    """Try multiple key names (camelCase + snake_case) on a dict-like object."""
-    for k in keys:
-        try:
-            v = d.get(k)
-        except Exception:
+# ---------------------------------------------------------------------------
+# Data source 1: Eastmoney (东方财富)
+# ---------------------------------------------------------------------------
+def _fetch_eastmoney() -> tuple[float | None, float | None]:
+    """Fetch NDX from Eastmoney push API.
+
+    secid=100.NDX — Eastmoney's internal security ID for Nasdaq-100.
+    f43 = current/latest price (×100, need to divide)
+    f60 = previous close           (×100, need to divide)
+    """
+    url = "https://push2.eastmoney.com/api/qt/stock/get?secid=100.NDX&fields=f43,f60"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        data = payload.get("data") or {}
+        # Eastmoney returns prices ×100 as integers; convert to float
+        price_raw = data.get("f43")
+        prev_raw = data.get("f60")
+        price = float(price_raw) / 100.0 if price_raw is not None else None
+        prev = float(prev_raw) / 100.0 if prev_raw is not None else None
+        if price is not None and prev is not None and price > 0 and prev > 0:
+            # Sanity check: NDX is typically 10000-30000
+            if 1000 < price < 100000 and 1000 < prev < 100000:
+                return price, prev
+            log.warning("eastmoney data out of expected range: price=%s, prev=%s", price, prev)
+        return None, None
+    except Exception as exc:
+        log.debug("eastmoney fetch failed: %s", exc)
+        return None, None
+
+
+# ---------------------------------------------------------------------------
+# Data source 2: Tencent (腾讯财经)
+# ---------------------------------------------------------------------------
+def _fetch_tencent() -> tuple[float | None, float | None]:
+    """Fetch NDX from Tencent finance API.
+
+    URL: https://qt.gtimg.cn/q=usNDX
+    Response format: v_usNDX="200~纳斯达克100~.NDX~<current>~<prev_close>~<open>~..."
+    Fields are ~ separated; index 3 = current price, index 4 = previous close.
+    """
+    url = "https://qt.gtimg.cn/q=usNDX"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=HTTP_TIMEOUT) as resp:
+            text = resp.read().decode("gbk", errors="replace")
+        # Extract the quoted string: v_usNDX="....";
+        start = text.find('"')
+        if start < 0:
+            return None, None
+        end = text.find('"', start + 1)
+        if end < 0:
+            return None, None
+        content = text[start + 1:end]
+        parts = content.split("~")
+        # parts[3] = current price, parts[4] = previous close
+        if len(parts) < 5:
+            return None, None
+        price = float(parts[3]) if parts[3] else None
+        prev = float(parts[4]) if parts[4] else None
+        if price is not None and prev is not None and price > 0 and prev > 0:
+            return price, prev
+        return None, None
+    except Exception as exc:
+        log.debug("tencent fetch failed: %s", exc)
+        return None, None
+
+
+# ---------------------------------------------------------------------------
+# Data source 3: Yahoo Finance (yfinance) — optional fallback
+# ---------------------------------------------------------------------------
+def _fetch_yfinance() -> tuple[float | None, float | None]:
+    """Fetch NDX from Yahoo Finance via yfinance library (optional)."""
+    try:
+        import yfinance as yf
+    except ImportError:
+        return None, None
+    try:
+        ndx = yf.Ticker(TICKER_SYMBOL)
+        info = ndx.fast_info
+        price = None
+        prev = None
+        for k in ("lastPrice", "last_price", "lastRegularMarketPrice"):
             v = None
-        if v is not None:
-            return float(v)
-    return None
+            try:
+                v = info.get(k)
+            except Exception:
+                pass
+            if v is not None:
+                price = float(v)
+                break
+        for k in ("previousClose", "previous_close", "regularMarketPreviousClose"):
+            v = None
+            try:
+                v = info.get(k)
+            except Exception:
+                pass
+            if v is not None:
+                prev = float(v)
+                break
+        # Fallback to history API
+        if price is None or prev is None:
+            hist = ndx.history(period="2d")
+            if hist is not None and not hist.empty:
+                closes = hist["Close"].tolist()
+                if prev is None and len(closes) >= 2:
+                    prev = float(closes[-2])
+                if price is None and closes:
+                    price = float(closes[-1])
+        if price and prev and price > 0 and prev > 0:
+            return price, prev
+        return None, None
+    except Exception as exc:
+        log.debug("yfinance fetch failed: %s", exc)
+        return None, None
 
 
 def get_index_change() -> tuple[float | None, float | None, float | None]:
     """Fetch the current Nasdaq-100 index data.
 
-    Returns (current_price, previous_close, change_pct) or (None, None, None) on error.
-    change_pct is the regular-market percent change: (price - prev_close) / prev_close * 100
+    Tries multiple data sources in order. Returns
+    (current_price, previous_close, change_pct) or (None, None, None) on error.
+    change_pct = (price - prev_close) / prev_close * 100
     """
-    try:
-        ndx = yf.Ticker(TICKER_SYMBOL)
+    for source_name, fetcher in (
+        ("eastmoney", _fetch_eastmoney),
+        ("tencent", _fetch_tencent),
+        ("yfinance", _fetch_yfinance),
+    ):
+        price, prev = fetcher()
+        if price is not None and prev is not None and prev > 0:
+            change_pct = (price - prev) / prev * 100.0
+            log.debug("data from %s: price=%.2f prev=%.2f change=%.2f%%", source_name, price, prev, change_pct)
+            return price, prev, change_pct
+        log.debug("source %s returned no data", source_name)
 
-        # Try fast_info first (lightweight)
-        current_price = None
-        previous_close = None
-        try:
-            info = ndx.fast_info
-            current_price = _get_nested(info, "lastPrice", "last_price", "lastRegularMarketPrice", "last_regular_market_price")
-            previous_close = _get_nested(info, "previousClose", "previous_close", "regularMarketPreviousClose", "regular_market_previous_close")
-        except Exception as exc:
-            log.debug("fast_info failed: %s", exc)
-
-        # Fallback: use the history API (2-day) which gives yesterday + today's close
-        if current_price is None or previous_close is None:
-            hist = ndx.history(period="2d")
-            if hist is not None and not hist.empty:
-                closes = hist["Close"].tolist()
-                if previous_close is None and len(closes) >= 2:
-                    previous_close = float(closes[-2])
-                elif previous_close is None and len(closes) == 1:
-                    previous_close = float(closes[0])
-                if current_price is None and closes:
-                    current_price = float(closes[-1])
-
-        if current_price is None or previous_close is None or previous_close == 0:
-            log.warning("could not fetch complete data: price=%s, prev_close=%s", current_price, previous_close)
-            return None, None, None
-
-        change_pct = (current_price - previous_close) / previous_close * 100.0
-        return current_price, previous_close, change_pct
-    except Exception as exc:
-        log.error("fetch index data failed: %s", exc)
-        return None, None, None
+    log.warning("all data sources failed this cycle")
+    return None, None, None
 
 
 def should_alert(change_pct: float) -> bool:
@@ -211,6 +305,7 @@ def main() -> None:
     log.info("config: ticker=%s  threshold=%.1f%%  interval=%ds  cooldown=%ds",
              TICKER_SYMBOL, THRESHOLD_PCT, CHECK_INTERVAL, ALERT_COOLDOWN)
     log.info("market hours: Mon-Fri 09:30-16:00 ET")
+    log.info("data sources: eastmoney -> tencent -> yfinance")
 
     # Graceful shutdown
     running = [True]

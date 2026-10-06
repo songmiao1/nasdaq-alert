@@ -1,1 +1,3 @@
+# yfinance is an optional fallback data source (may be geo-blocked in China).
+# The primary sources (Eastmoney + Tencent) use only the standard library.
 yfinance>=0.2.40
