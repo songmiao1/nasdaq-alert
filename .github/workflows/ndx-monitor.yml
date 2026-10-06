@@ -1,0 +1,62 @@
+name: NDX Monitor (GitHub Actions backup)
+
+on:
+  # Run during US market hours as a backup in case the remote server is down.
+  # GitHub Actions schedule is in UTC. US market 9:30 AM ET = 13:30/14:30 UTC (depending on DST).
+  schedule:
+    # ~13:30 UTC (EST) / 14:30 UTC (EDT) — market open
+    - cron: "30 13 * * 1-5"
+    - cron: "30 14 * * 1-5"
+    # ~20:00 UTC — near market close
+    - cron: "0 20 * * 1-5"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ndx-monitor
+  cancel-in-progress: false
+
+jobs:
+  check-and-alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run single check
+        env:
+          TZ: America/New_York
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_SSL: ${{ secrets.SMTP_SSL }}
+          SMTP_EMAIL: ${{ secrets.SMTP_EMAIL }}
+          SMTP_PASSWORD: ${{ secrets.SMTP_PASSWORD }}
+          SMTP_NAME: ${{ secrets.SMTP_NAME }}
+          SMTP_TO: ${{ secrets.SMTP_TO }}
+          NDX_THRESHOLD_PCT: ${{ vars.NDX_THRESHOLD_PCT }}
+        run: |
+          python -c "
+          from monitor import run_once, _now_et, is_market_open
+          import logging
+          logging.basicConfig(level=logging.INFO, format='%(asctime)s | %(levelname)-7s | %(message)s')
+          now = _now_et()
+          print(f'Now (ET): {now}')
+          if not is_market_open(now):
+              print('Market is CLOSED, skipping check.')
+              exit(0)
+          print('Market is OPEN, running check...')
+          run_once()
+          "

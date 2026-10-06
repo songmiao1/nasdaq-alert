@@ -1,0 +1,18 @@
+[Unit]
+Description=Nasdaq-100 Index Drop Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/nasdaq-alert
+EnvironmentFile=/opt/nasdaq-alert/.env
+ExecStart=/opt/nasdaq-alert/.venv/bin/python /opt/nasdaq-alert/monitor.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
