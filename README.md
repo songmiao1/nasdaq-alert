@@ -4,7 +4,10 @@ Nasdaq-100 (NDX) index drop monitor — sends email alerts when the daily change
 
 ## Features
 
-- Monitors the Nasdaq-100 index (`^NDX`) via Yahoo Finance (`yfinance`)
+- Monitors the Nasdaq-100 index (NDX) via multiple data sources with automatic fallback:
+  1. **Eastmoney** (东方财富, `push2.eastmoney.com`) — primary, China-accessible
+  2. **Tencent** (`qt.gtimg.cn`) — fallback, China-accessible
+  3. **Yahoo Finance** (`yfinance`) — last resort, may be geo-blocked in China
 - Checks every minute during US market regular hours (Mon-Fri 9:30 AM – 4:00 PM ET)
 - Sends an email alert when daily change drops below a configurable threshold (default -1%)
 - 30-minute cooldown between repeated alerts to prevent spam
@@ -53,15 +56,23 @@ All settings via environment variables (see `.env.example`):
 
 ## Deploy as systemd service
 
+The service is installed at `/opt/nasdaq-alert` on the remote server (123.56.111.40).
+
 ```bash
+# Install service
 sudo cp deploy/nasdaq-alert.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now nasdaq-alert
-sudo journalctl -u nasdaq-alert -f
+
+# Manage
+sudo systemctl status nasdaq-alert
+sudo journalctl -u nasdaq-alert -f        # follow logs
+sudo systemctl restart nasdaq-alert       # restart after config change
 ```
 
-See `deploy/README.md` for full instructions.
+## GitHub Actions
 
-## GitHub Actions (optional)
+Two workflows are included:
 
-A workflow is included for manual testing and scheduled health checks.
+- `ndx-monitor.yml` — runs during US market hours as a backup if the remote server is down
+- `deploy-config.yml` — deploys SMTP secrets from GitHub Secrets to the remote `.env` file
