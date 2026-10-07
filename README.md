@@ -56,7 +56,7 @@ All settings via environment variables (see `.env.example`):
 
 ## Deploy as systemd service
 
-The service is installed at `/opt/nasdaq-alert` on the remote server (123.56.111.40).
+The service runs at `/opt/nasdaq-alert` on the remote server, managed by systemd.
 
 ```bash
 # Install service
@@ -69,10 +69,3 @@ sudo systemctl status nasdaq-alert
 sudo journalctl -u nasdaq-alert -f        # follow logs
 sudo systemctl restart nasdaq-alert       # restart after config change
 ```
-
-## GitHub Actions
-
-Two workflows are included:
-
-- `ndx-monitor.yml` — runs during US market hours as a backup if the remote server is down
-- `deploy-config.yml` — deploys SMTP secrets from GitHub Secrets to the remote `.env` file
