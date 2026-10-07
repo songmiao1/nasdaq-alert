@@ -33,7 +33,7 @@ from notify import send as send_email
 # ---------------------------------------------------------------------------
 # Configuration (all overridable via environment variables)
 # ---------------------------------------------------------------------------
-THRESHOLD_PCT = float(os.environ.get("NDX_THRESHOLD_PCT", "-1.0"))  # trigger when change <= -1%
+THRESHOLD_PCT = float(os.environ.get("NDX_THRESHOLD_PCT", "-0.8"))  # trigger when change <= -0.8%
 TICKER_SYMBOL = os.environ.get("NDX_TICKER", "^NDX")                # Nasdaq-100 Index
 CHECK_INTERVAL = int(os.environ.get("NDX_CHECK_INTERVAL", "60"))    # seconds between checks
 MARKET_TZ = ZoneInfo(os.environ.get("NDX_MARKET_TZ", "America/New_York"))  # ET
